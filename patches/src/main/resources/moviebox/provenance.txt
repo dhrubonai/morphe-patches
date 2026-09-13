@@ -1,7 +1,7 @@
-build-tools 37.0.0
-platform android-36
-javac 21.0.12
-ddc427d9cc1079fb6b95c52c65599562dbd432124d624044fcd0feacf86e4c22  src/hx/AppPatch.java
+portable toolchain (r8 D8 + Sable android-30, jdk.compiler 21.0.12)
+platform android-30
+cbdc2e8fb6074a048ebc5e5071c5b7a4da3320828b8126128108e98a227c0ac6  src/hx/AppPatch.java
 dcc4bd7bac51edd1af5195c2e842672038c0398434c3034489bb19ccf2fdc921  src/hx/DashFile.java
 f224d15d1bb2015bec350afc4738963b9864389ed38c0cbeb0710087ba885471  src/hx/DashServer.java
-66e58b1f0929fa82eaf776afe713ab996a58ff4c9ce17bbcbbdf63fe8e6fa79c  dashhook.dex
+29a3fd4e340ad48563211d9d50da99142ab9d1ae0fb09d23a0687c114d4a8328  src/hx/DhruboPromo.java
+204e351d76b6951d4222032290c59bf9bbe45367c7072a41102de0bb5ebe0185  dashhook.dex

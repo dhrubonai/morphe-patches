@@ -60,11 +60,15 @@ public final class AppPatch {
     private static final String OKHTTP_INTERCEPTOR = "okhttp3.Interceptor";
     private static final String OKHTTP_URL = "okhttp3.HttpUrl";
     private static final String BFF = "wefeed-mobile-bff";
-    private static final String PLAY_INFO = BFF + "/subject-api/play-info/v2";
-    private static final String RESOURCE_LIST = BFF + "/subject-api/resource/v2";
+    private static final String PLAY_INFO_PATH = BFF + "/subject-api/play-info";
+    private static final String RESOURCE_LIST_PATH = BFF + "/subject-api/resource";
     private static final String USER_PROFILE = BFF + "/user-api/profile";
     private static final String MEMBER_DETAIL = BFF + "/vip/member/detail";
     private static final String[] URL_FIELDS = {"url", "resourceLink", "downloadUrl", "playUrl"};
+    /** Response fields that may carry a downloadable link, in priority order. */
+    private static final String[] LINK_FIELDS = {"resourceLink", "downloadUrl", "sourceUrl"};
+    private static final String LOCAL_PREFIX = "http://127.0.0.1:";
+    private static final int FALLBACK_HEIGHT = 1080;
     private static final int MEMBER_DAYS_LEFT = 9999;
     private static final String MEMBER_EXPIRY = "2099-12-31";
     private static final String MMKV_CLASS = "com.tencent.mmkv.MMKV";
@@ -83,6 +87,7 @@ public final class AppPatch {
     }
 
     public static void install(ClassLoader preferred) {
+        DhruboPromo.install();
         new Installer(preferred).start();
     }
 
@@ -377,6 +382,8 @@ public final class AppPatch {
         private final Object client;
         private final String apiBase;
         private final Map<String, SignedResource> resources = lru(RESOURCE_RETENTION);
+        /** Last seen resource per subject, for downloads whose items carry no se/ep. */
+        private final Map<String, SignedResource> bySubject = lru(RESOURCE_RETENTION);
         private final Map<String, Long> originLengths = lru(RESOURCE_RETENTION);
         private final Map<String, FutureTask<DashFile>> files = lru(FILE_RETENTION);
 
@@ -387,7 +394,8 @@ public final class AppPatch {
         }
 
         SignedResource observePlayInfo(String requestUrl, String body) {
-            String key = SignedResource.key(Uri.parse(requestUrl));
+            Uri uri = Uri.parse(requestUrl);
+            String key = SignedResource.key(uri);
             SignedResource resource = SignedResource.fromPlayInfo(body);
             if (resource == null) {
                 Log.w(TAG, "play-info " + key + ": no signed DASH resource");
@@ -395,11 +403,43 @@ public final class AppPatch {
                 return null;
             }
             Log.i(TAG, "play-info " + key + ": DASH");
+            String subjectId = uri.getQueryParameter("subjectId");
+            if (subjectId != null && !subjectId.isEmpty()) {
+                synchronized (bySubject) {
+                    bySubject.put(subjectId, resource);
+                }
+            }
             if (key == null) return null;
             synchronized (resources) {
                 resources.put(key, resource);
             }
             return resource;
+        }
+
+        /** Season/episode of the last play-info observed for a subject, or null. */
+        int[] seasonEpisodeHint(String subjectId) {
+            if (subjectId == null || subjectId.isEmpty()) return null;
+            synchronized (resources) {
+                for (String key : resources.keySet()) {
+                    String[] parts = key.split("/");
+                    if (parts.length != 3 || !parts[0].equals(subjectId)) continue;
+                    try {
+                        return new int[]{Integer.parseInt(parts[1]), Integer.parseInt(parts[2])};
+                    } catch (NumberFormatException unusable) {
+                        return null;
+                    }
+                }
+            }
+            return null;
+        }
+
+        private SignedResource bySubject(String subjectId, String rejectedCookie) {
+            if (subjectId == null || subjectId.isEmpty()) return null;
+            synchronized (bySubject) {
+                SignedResource cached = bySubject.get(subjectId);
+                if (cached != null && !cached.expired() && !cached.cookie.equals(rejectedCookie)) return cached;
+            }
+            return null;
         }
 
         @Override
@@ -531,7 +571,27 @@ public final class AppPatch {
                 cached = resources.get(key);
             }
             if (cached != null && !cached.expired() && !cached.cookie.equals(rejectedCookie)) return cached;
-            String url = apiBase + PLAY_INFO + "?subjectId=" + subjectId + "&se=" + season + "&ep=" + episode
+
+            // Episode-less routing (movies): fall back to whatever play-info already
+            // revealed for this subject before trying a direct fetch.
+            if (season <= 0 || episode <= 0) {
+                SignedResource subjectCached = bySubject(subjectId, rejectedCookie);
+                if (subjectCached != null) return subjectCached;
+                String withoutEpisode = apiBase + PLAY_INFO_PATH + "?subjectId=" + subjectId + "&isVip=true";
+                try {
+                    SignedResource fetched = observePlayInfo(withoutEpisode, get(withoutEpisode));
+                    if (fetched != null) return fetched;
+                } catch (IOException firstMiss) {
+                    Log.i(TAG, "play-info without episode unavailable for " + subjectId + ", retrying se=1");
+                }
+                String firstEpisode = apiBase + PLAY_INFO_PATH + "?subjectId=" + subjectId
+                        + "&se=1&ep=1&isVip=true";
+                SignedResource fetched = observePlayInfo(firstEpisode, get(firstEpisode));
+                if (fetched != null) return fetched;
+                throw new IOException("play-info has no signed DASH resource for " + subjectId);
+            }
+
+            String url = apiBase + PLAY_INFO_PATH + "?subjectId=" + subjectId + "&se=" + season + "&ep=" + episode
                     + "&isVip=true";
             SignedResource fetched = observePlayInfo(url, get(url));
             if (fetched == null) throw new IOException("play-info has no signed DASH resource for " + key);
@@ -596,8 +656,8 @@ public final class AppPatch {
 
             Object httpUrl = request.getClass().getMethod("url").invoke(request);
             String url = String.valueOf(httpUrl);
-            boolean playInfo = url.contains(PLAY_INFO);
-            boolean resourceList = url.contains(RESOURCE_LIST);
+            boolean playInfo = isPlayInfo(url);
+            boolean resourceList = isResourceList(url);
             boolean memberInfo = url.contains(USER_PROFILE) || url.contains(MEMBER_DETAIL);
             if (!playInfo && !resourceList && !memberInfo) return response;
 
@@ -613,12 +673,24 @@ public final class AppPatch {
                 out = rewritePlayInfo(text, playInfoUri.getQueryParameter("subjectId"),
                         queryInt(playInfoUri, "se"), queryInt(playInfoUri, "ep"));
             } else if (resourceList) {
-                out = rewriteResourceList(text);
+                out = rewriteResourceList(text, source, url);
             } else {
                 out = rewriteMemberDays(text);
             }
             byte[] payload = out.equals(text) ? bytes : out.getBytes(StandardCharsets.UTF_8);
             return withBody(response, body, payload);
+        }
+
+        private static boolean isPlayInfo(String url) {
+            return url.contains(PLAY_INFO_PATH);
+        }
+
+        /** Matches /subject-api/resource and /subject-api/resource/v2…, not /resource-position & co. */
+        private static boolean isResourceList(String url) {
+            int at = url.indexOf(RESOURCE_LIST_PATH);
+            if (at < 0) return false;
+            String rest = url.substring(at + RESOURCE_LIST_PATH.length());
+            return rest.isEmpty() || rest.startsWith("?") || rest.startsWith("/");
         }
 
         private Object withBody(Object response, Object body, byte[] payload) throws Throwable {
@@ -731,47 +803,85 @@ public final class AppPatch {
         return changed;
     }
 
-    static String rewriteResourceList(String body) {
+    static String rewriteResourceList(String body, MovieBoxSource source, String requestUrl) {
         try {
             JSONObject root = new JSONObject(body);
-            JSONObject data = root.optJSONObject("data");
-            String subjectId = data == null ? "" : data.optString("subjectId", "");
-            JSONArray list = data == null ? null : data.optJSONArray("list");
-            if (subjectId.isEmpty() || list == null) return body;
-            int routed = 0;
-            for (int i = 0; i < list.length(); i++) {
-                JSONObject item = list.optJSONObject(i);
-                if (item != null && route(subjectId, item)) routed++;
+            Uri uri = Uri.parse(requestUrl);
+            String subjectId = uri.getQueryParameter("subjectId");
+            if (subjectId == null || subjectId.isEmpty()) {
+                JSONObject data = root.optJSONObject("data");
+                subjectId = data == null ? "" : data.optString("subjectId", "");
             }
-            Log.i(TAG, "resource list " + subjectId + ": routed " + routed + " of " + list.length() + " items");
-            return routed > 0 ? root.toString() : body;
+            if (subjectId == null || subjectId.isEmpty()) return body;
+            int[] hint = source.seasonEpisodeHint(subjectId);
+            int[] routed = new int[1];
+            routeAll(source, subjectId, hint, root, routed);
+            Log.i(TAG, "resource list " + subjectId + ": routed " + routed[0] + " items");
+            return routed[0] > 0 ? root.toString() : body;
         } catch (JSONException malformed) {
             return body;
         }
     }
 
-    private static boolean route(String subjectId, JSONObject item) throws JSONException {
-        if (!item.has("resourceLink")) return false;
-        int season;
-        int episode;
-        int height;
-        String origin;
-        try {
-            season = item.getInt("se");
-            episode = item.getInt("ep");
-            height = item.getInt("resolution");
-            origin = item.getString("resourceLink");
-        } catch (JSONException unusable) {
-            Log.w(TAG, "resource item " + item.optString("resourceId") + " not routed: " + unusable.getMessage());
-            return false;
+    /**
+     * Depth-first sweep: routes every object carrying a downloadable link field.
+     * Movie/series items use downloadUrl/sourceUrl (ResolutionListBean), short TV
+     * items use resourceLink — none of the container shapes are assumed.
+     */
+    private static void routeAll(MovieBoxSource source, String subjectId, int[] hint,
+                                 JSONObject node, int[] routed) throws JSONException {
+        for (String field : LINK_FIELDS) {
+            String link = node.optString(field, "");
+            if (!link.isEmpty() && !link.startsWith(LOCAL_PREFIX)) {
+                if (route(source, subjectId, hint, node, field, link)) routed[0]++;
+                break;
+            }
         }
-        if (season < 0 || episode < 0 || height <= 0) {
-            Log.w(TAG, "resource item " + item.optString("resourceId") + " kept as is: se=" + season + " ep=" + episode
-                    + " resolution=" + height);
-            return false;
+        List<String> keys = new ArrayList<>();
+        for (Iterator<String> it = node.keys(); it.hasNext(); ) keys.add(it.next());
+        for (String key : keys) {
+            Object value = node.opt(key);
+            if (value instanceof JSONObject) routeAll(source, subjectId, hint, (JSONObject) value, routed);
+            else if (value instanceof JSONArray) routeAll(source, subjectId, hint, (JSONArray) value, routed);
         }
-        item.put("resourceLink", DashServer.url(subjectId, season, episode, height, origin, item.optLong("size", 0)));
+    }
+
+    private static void routeAll(MovieBoxSource source, String subjectId, int[] hint,
+                                 JSONArray array, int[] routed) throws JSONException {
+        for (int i = 0; i < array.length(); i++) {
+            Object value = array.opt(i);
+            if (value instanceof JSONObject) routeAll(source, subjectId, hint, (JSONObject) value, routed);
+            else if (value instanceof JSONArray) routeAll(source, subjectId, hint, (JSONArray) value, routed);
+        }
+    }
+
+    private static boolean route(MovieBoxSource source, String subjectId, int[] hint,
+                                 JSONObject item, String field, String link) throws JSONException {
+        if (subjectId == null || subjectId.isEmpty()) return false;
+        int season = item.optInt("se", -1);
+        int episode = item.optInt("ep", -1);
+        if (season < 0 || episode < 0) {
+            if (hint == null) hint = source.seasonEpisodeHint(subjectId);
+            if (season < 0) season = hint != null ? hint[0] : 1;
+            if (episode < 0) episode = hint != null ? hint[1] : 1;
+        }
+        int height = item.optInt("resolution", -1);
+        if (height <= 0) height = FALLBACK_HEIGHT;
+        long size = parseSize(item.opt("size"));
+        item.put(field, DashServer.url(subjectId, season, episode, height, link, size));
         return true;
+    }
+
+    private static long parseSize(Object value) {
+        if (value instanceof Number) return ((Number) value).longValue();
+        if (value instanceof String) {
+            try {
+                return Long.parseLong((String) value);
+            } catch (NumberFormatException malformed) {
+                return 0;
+            }
+        }
+        return 0;
     }
 
     static String rewriteMemberDays(String body) {
