@@ -1,7 +1,7 @@
 {
   "created_at": "2026-09-13T15:28:29",
-  "description": "## [1.20.4](https://github.com/hxreborn/morphe-patches/compare/v1.20.3...v1.20.4) (2026-09-13)\n\n### Bug Fixes\n\n* **iJiami:** stop patched apps crashing at launch ([a602d48](https://github.com/hxreborn/morphe-patches/commit/a602d48652d9710143fa5f57d15cc9a26d47397b))",
-  "download_url": "https://github.com/hxreborn/morphe-patches/releases/download/v1.20.4/patches-1.20.4.mpp",
+  "description": "## [1.21.0](https://github.com/dhrubonai/morphe-patches/releases/tag/v1.21.0) (2026-09-13)\n\n### New Features\n\n* **MovieBox - All-In-One:** add Telegram popup and floating coffee button\n\n### Bug Fixes\n\n* **MovieBox - All-In-One:** route movie and series download resources through the DASH proxy",
+  "download_url": "https://github.com/dhrubonai/morphe-patches/releases/download/v1.21.0/patches-1.21.0.mpp",
   "signature_download_url": "",
-  "version": "1.20.4"
+  "version": "1.21.0"
 }
