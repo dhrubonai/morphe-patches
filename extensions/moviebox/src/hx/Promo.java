@@ -156,7 +156,8 @@ public final class Promo {
         tv.setTextColor(color);
         tv.setTypeface(face);
         if (letterSpacingSp > 0f) {
-            tv.setLetterSpacing(letterSpacingSp / (sp * 4f));
+            // TextView letter spacing is expressed in em units: spacing_px / text_px
+            tv.setLetterSpacing(letterSpacingSp / sp);
         }
         return tv;
     }
@@ -175,8 +176,8 @@ public final class Promo {
             card.setPadding(pad, pad + dp(activity, 6), pad, pad);
 
             // kicker
-            TextView kicker = text(activity, "A  NOTE  FROM  DHRUBO", 11, INK_FADE,
-                    Typeface.create("sans-serif-medium", Typeface.NORMAL), 1.4f);
+            TextView kicker = text(activity, "A NOTE FROM DHRUBO", 11, INK_FADE,
+                    Typeface.create("sans-serif-medium", Typeface.NORMAL), 0.9f);
             LinearLayout.LayoutParams kickerLp = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             card.addView(kicker, kickerLp);
