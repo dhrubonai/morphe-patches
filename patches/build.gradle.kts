@@ -2,12 +2,12 @@ group = "app.hxreborn"
 
 patches {
     about {
-        name = "hxreborn’s patches"
-        description = "Patches for the apps I actually use"
-        source = "git@github.com:hxreborn/morphe-patches.git"
-        author = "hxreborn"
-        contact = "https://github.com/hxreborn/morphe-patches/issues"
-        website = "https://github.com/hxreborn/morphe-patches"
+        name = "Dhrubo Patches"
+        description = "hxreborn's patches with MovieBox extras: Telegram popup, coffee button and fixed downloads"
+        source = "git@github.com:dhrubonai/morphe-patches.git"
+        author = "dhrubonai"
+        contact = "https://github.com/dhrubonai/morphe-patches/issues"
+        website = "https://github.com/dhrubonai/morphe-patches"
         license = "GPLv3"
     }
 }
