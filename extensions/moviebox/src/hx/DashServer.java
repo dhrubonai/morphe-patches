@@ -61,8 +61,11 @@ final class DashServer implements Runnable {
     private static final String TAG = "hxreborn/moviebox";
     private static final byte[] LOOPBACK = {127, 0, 0, 1};
     private static final int BACKLOG = 16;
-    private static final int WORKERS = 8;
-    private static final int QUEUED_REQUESTS = 16;
+    // Downloads open parallel range connections (the patched app runs up to 5 download tasks
+    // at once, each with its own probes), so keep generous headroom over the old 8/16 pool
+    // or connections get dropped under load and downloads stall.
+    private static final int WORKERS = 24;
+    private static final int QUEUED_REQUESTS = 64;
     private static final long WORKER_KEEP_ALIVE_S = 30L;
     private static final int SOCKET_TIMEOUT_MS = 30000;
     private static final int OUTPUT_BUFFER_BYTES = 1 << 16;
