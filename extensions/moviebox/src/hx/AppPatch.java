@@ -644,6 +644,8 @@ public final class AppPatch {
             String text = new String(bytes, StandardCharsets.UTF_8);
             String out;
             if (playInfo) {
+                // the player flow just asked for a signed stream; promo layers back off
+                Promo.onPlaybackStarted();
                 source.observePlayInfo(url, text);
                 Uri playInfoUri = Uri.parse(url);
                 out = rewritePlayInfo(text, playInfoUri.getQueryParameter("subjectId"),
