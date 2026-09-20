@@ -64,7 +64,7 @@ public final class AppPatch {
     private static final String RESOURCE_LIST = BFF + "/subject-api/resource/v2";
     private static final String USER_PROFILE = BFF + "/user-api/profile";
     private static final String MEMBER_DETAIL = BFF + "/vip/member/detail";
-    private static final String[] URL_FIELDS = {"url", "resourceLink", "downloadUrl", "playUrl", "sourceUrl"};
+    private static final String[] URL_FIELDS = {"url", "resourceLink", "downloadUrl", "playUrl"};
     private static final int MEMBER_DAYS_LEFT = 9999;
     private static final String MEMBER_EXPIRY = "2099-12-31";
     private static final String MMKV_CLASS = "com.tencent.mmkv.MMKV";
@@ -644,8 +644,6 @@ public final class AppPatch {
             String text = new String(bytes, StandardCharsets.UTF_8);
             String out;
             if (playInfo) {
-                // the player flow just asked for a signed stream; promo layers back off
-                Promo.onPlaybackStarted();
                 source.observePlayInfo(url, text);
                 Uri playInfoUri = Uri.parse(url);
                 out = rewritePlayInfo(text, playInfoUri.getQueryParameter("subjectId"),

@@ -18,7 +18,6 @@ package hx;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Application;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -31,7 +30,6 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
 import android.util.Base64;
 import android.util.Log;
 import android.util.TypedValue;
@@ -45,9 +43,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.Calendar;
-import java.util.HashMap;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Random;
 
 /**
@@ -55,15 +51,15 @@ import java.util.Random;
  * - a Telegram channel card shown on app (re)open, at most POPUP_DAILY_LIMIT
  *   times per calendar day, typeset like a handwritten note: off-white paper,
  *   ink-black serif type;
- * - a floating "Buy me a cup of coffee" pill pinned to the bottom-right of the
- *   home screen only (never on the streaming/player flow), shown for a short
- *   10-15 second window, at most COFFEE_DAILY_LIMIT times per calendar day.
+ * - a floating "Buy me a cup of coffee" pill pinned to the bottom-right of
+ *   any screen that is not playback-like (never on the streaming/player
+ *   flow), shown for a short 10-15 second window, at most COFFEE_DAILY_LIMIT
+ *   times per calendar day.
  *
  * Cadence is tracked per device profile in a private SharedPreferences file.
- * The home screen is identified at runtime - the launcher activity plus a
- * self-learned most-dwelled activity (persisted) - so the rules survive app
- * updates and obfuscated class names. AppPatch reports player flow via
- * {@link #onPlaybackStarted()}; the coffee pill always backs off around it.
+ * Playback-like screens are excluded purely by activity class-name hints, so
+ * the rules survive app updates and obfuscated class names without any
+ * home-screen learning.
  *
  * Everything runs best-effort: any failure is logged and swallowed so the host app
  * can never crash because of the promo layer.
@@ -83,8 +79,6 @@ public final class Promo {
     private static final String KEY_POPUP_COUNT = "popup_count";
     private static final String KEY_COFFEE_COUNT = "coffee_count";
     private static final String KEY_COFFEE_LAST_AT = "coffee_last_at";
-    private static final String KEY_MAIN_ACTIVITY = "main_activity";
-    private static final String KEY_DWELL_PREFIX = "dwell_";
     private static final int POPUP_DAILY_LIMIT = 3;
     private static final int COFFEE_DAILY_LIMIT = 5;
     private static final long COFFEE_COOLDOWN_MS = 3 * 60_000L;   // gap between two coffee shows
@@ -92,8 +86,6 @@ public final class Promo {
     private static final long COFFEE_SHOW_JITTER_MS = 5_000L;     // ...up to 15s
     private static final long COFFEE_ATTACH_DELAY_MS = 2500L;     // settle delay before showing
     private static final long COFFEE_TICK_MS = 30_000L;           // home screen re-show poll
-    private static final long PLAYBACK_QUIET_MS = 5 * 60_000L;    // coffee backs off after streaming
-    private static final long MAIN_DWELL_MIN_MS = 60_000L;        // dwell needed to learn the home screen
 
     // class-name hints for playback-like screens; the coffee pill never targets them
     private static final String[] PLAYBACK_HINTS = {
@@ -120,15 +112,6 @@ public final class Promo {
     private static int started;
     private static Activity top;
     private static Bitmap coffeeBitmap;
-
-    // cadence state
-    private static volatile long lastPlaybackAt;
-    private static volatile String learnedMain;
-    private static boolean learnedLoaded;
-    private static String resumedName;
-    private static long resumedAt;
-    private static Map<String, Long> dwellMap;
-    private static String launcherName;
 
     private Promo() {
     }
@@ -159,18 +142,6 @@ public final class Promo {
                 } catch (Throwable t) {
                     Log.e(TAG, "promo: registration failed", t);
                 }
-            }
-        });
-    }
-
-    /** Called by AppPatch when the player flow requests a signed stream. */
-    public static void onPlaybackStarted() {
-        lastPlaybackAt = SystemClock.elapsedRealtime();
-        MAIN.post(new Runnable() {
-            @Override
-            public void run() {
-                Activity activity = current();
-                if (activity != null) removeCoffee(activity);
             }
         });
     }
@@ -225,11 +196,6 @@ public final class Promo {
         }
     }
 
-    private static boolean playbackRecent() {
-        long at = lastPlaybackAt;
-        return at != 0L && SystemClock.elapsedRealtime() - at < PLAYBACK_QUIET_MS;
-    }
-
     private static boolean playbackLike(String className) {
         if (className == null) return false;
         String lower = className.toLowerCase(Locale.US);
@@ -239,107 +205,15 @@ public final class Promo {
         return false;
     }
 
-    private static String launcherActivityName(Activity activity) {
-        if (launcherName != null) return launcherName;
-        try {
-            Intent launch = activity.getPackageManager()
-                    .getLaunchIntentForPackage(activity.getPackageName());
-            ComponentName component = launch == null ? null : launch.getComponent();
-            launcherName = component == null ? null : component.getClassName();
-        } catch (Throwable t) {
-            launcherName = null;
-        }
-        return launcherName;
-    }
-
-    private static Map<String, Long> dwell(Context context) {
-        Map<String, Long> known = dwellMap;
-        if (known != null) return known;
-        Map<String, Long> loaded = new HashMap<>();
-        try {
-            for (Map.Entry<String, ?> entry : prefs(context).getAll().entrySet()) {
-                if (entry.getKey().startsWith(KEY_DWELL_PREFIX) && entry.getValue() instanceof Long) {
-                    loaded.put(entry.getKey().substring(KEY_DWELL_PREFIX.length()), (Long) entry.getValue());
-                }
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "promo: dwell history unavailable", t);
-        }
-        synchronized (lock) {
-            if (dwellMap == null) dwellMap = loaded;
-            return dwellMap;
-        }
-    }
-
-    private static void noteDwellResume(Activity activity) {
-        try {
-            if (!learnedLoaded) {
-                learnedLoaded = true;
-                learnedMain = prefs(activity).getString(KEY_MAIN_ACTIVITY, null);
-            }
-            resumedName = activity.getClass().getName();
-            resumedAt = SystemClock.elapsedRealtime();
-        } catch (Throwable t) {
-            Log.w(TAG, "promo: dwell resume note skipped", t);
-        }
-    }
-
-    private static void noteDwellPause(Context context) {
-        String name = resumedName;
-        long beganAt = resumedAt;
-        resumedName = null;
-        resumedAt = 0L;
-        if (name == null || beganAt == 0L) return;
-        long session = SystemClock.elapsedRealtime() - beganAt;
-        if (session <= 0L || session > 12L * 60 * 60 * 1000L) return; // clock sanity
-        if (playbackLike(name)) return;
-        try {
-            Map<String, Long> known = dwell(context);
-            Long knownDwell = known.get(name);
-            long total = (knownDwell == null ? 0L : knownDwell) + session;
-            known.put(name, total);
-            prefs(context).edit().putLong(KEY_DWELL_PREFIX + name, total).apply();
-            if (total >= MAIN_DWELL_MIN_MS) relearnMain(context, known);
-        } catch (Throwable t) {
-            Log.w(TAG, "promo: dwell pause note skipped", t);
-        }
-    }
-
-    private static void relearnMain(Context context, Map<String, Long> known) {
-        String best = null;
-        long bestDwell = 0L;
-        for (Map.Entry<String, Long> entry : known.entrySet()) {
-            long value = entry.getValue() == null ? 0L : entry.getValue();
-            if (value < MAIN_DWELL_MIN_MS || playbackLike(entry.getKey())) continue;
-            if (value > bestDwell) {
-                best = entry.getKey();
-                bestDwell = value;
-            }
-        }
-        if (best == null || best.equals(learnedMain)) return;
-        learnedMain = best;
-        prefs(context).edit().putString(KEY_MAIN_ACTIVITY, best).apply();
-        Log.i(TAG, "promo: home screen learned");
-    }
-
-    private static boolean isMainPage(Activity activity) {
-        try {
-            String name = activity.getClass().getName();
-            if (playbackLike(name)) return false;
-            String launch = launcherActivityName(activity);
-            if (launch != null && launch.equals(name)) return true;
-            return name.equals(learnedMain);
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
     private static void startCoffeeTicker() {
         MAIN.postDelayed(new Runnable() {
             @Override
             public void run() {
                 Activity activity = current();
-                if (activity != null && isMainPage(activity)) attemptCoffeeShow(activity);
+                if (activity != null
+                        && !playbackLike(activity.getClass().getName())) {
+                    attemptCoffeeShow(activity);
+                }
                 MAIN.postDelayed(this, COFFEE_TICK_MS);
             }
         }, COFFEE_TICK_MS);
@@ -350,8 +224,7 @@ public final class Promo {
             if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
             if (current() != activity) return; // another screen took over meanwhile
             removeCoffee(activity);
-            if (!isMainPage(activity)) return;
-            if (playbackRecent()) return;
+            if (playbackLike(activity.getClass().getName())) return; // never on the player flow
             SharedPreferences store = prefs(activity);
             int count = dailyCount(store, KEY_COFFEE_COUNT);
             if (count >= COFFEE_DAILY_LIMIT) return;
@@ -633,9 +506,8 @@ public final class Promo {
             synchronized (lock) {
                 top = activity;
             }
-            noteDwellResume(activity);
             removeCoffee(activity);
-            if (isMainPage(activity)) {
+            if (!playbackLike(activity.getClass().getName())) {
                 MAIN.postDelayed(new Runnable() {
                     @Override
                     public void run() {
@@ -647,7 +519,6 @@ public final class Promo {
 
         @Override
         public void onActivityPaused(Activity activity) {
-            if (current() == activity) noteDwellPause(activity);
         }
 
         @Override
