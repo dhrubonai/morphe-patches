@@ -227,6 +227,18 @@
               "isExperimental": false,
               "minSdk": 29,
               "description": null
+            },
+            {
+              "version": "4.0.03.0918.03",
+              "versionCodes": {
+                "ARM64_V8A": 50020129,
+                "ARMEABI_V7A": 50020129,
+                "X86_64": 50020129,
+                "X86": 50020129
+              },
+              "isExperimental": false,
+              "minSdk": 29,
+              "description": null
             }
           ]
         }
