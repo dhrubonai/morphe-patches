@@ -3,7 +3,7 @@ group = "app.hxreborn"
 patches {
     about {
         name = "Dhrubo Patches"
-        description = "hxreborn's patches with MovieBox extras: Telegram popup, coffee button and fixed downloads"
+        description = "MovieBox patches"
         source = "git@github.com:dhrubonai/morphe-patches.git"
         author = "dhrubonai"
         contact = "https://github.com/dhrubonai/morphe-patches/issues"
