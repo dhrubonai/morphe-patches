@@ -146,3 +146,4 @@ bin/
 
 __pycache__/
 *.pyc
+local.properties
