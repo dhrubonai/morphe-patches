@@ -24,6 +24,7 @@ private const val OP_CONST_4 = 0x12
 private const val OP_CONST_16 = 0x13
 private const val OP_CONST = 0x14
 private const val OP_CONST_STRING = 0x1a
+private const val OP_CONST_STRING_JUMBO = 0x1b
 
 private const val STRING = "Ljava/lang/String;"
 private const val BOXED_BOOLEAN = "Ljava/lang/Boolean;"
@@ -132,11 +133,14 @@ internal class PayloadMethods(private val bodies: List<MethodBody>) {
     fun returnBoxed(value: Boolean) = bodies.forEach { it.returnBoxed(value) }
 
     fun returnBoxed(value: Int) = bodies.forEach { it.returnBoxed(value) }
+
+    fun replaceString(old: String, new: String) = bodies.forEach { it.replaceString(old, new) }
 }
 
 internal class MethodBody(
     private val dex: PayloadDex,
     private val payload: ByteArray,
+    private val methodIndex: Int,
     private val codeOffset: Int,
     private val returnType: String,
     private val description: String,
@@ -232,6 +236,34 @@ internal class MethodBody(
                 0,
             ),
         )
+    }
+
+    fun replaceString(old: String, new: String) {
+        val oldIndex = dex.stringIndexOf(old)
+            ?: throw PatchException("Missing string \"$old\" in dex for $description")
+        val newIndex = dex.stringIndexOf(new)
+            ?: throw PatchException("Missing string \"$new\" in dex for $description")
+
+        var replaced = 0
+        dex.walkCode(methodIndex, codeOffset - dex.start) { opcode, operand, at ->
+            if (operand == oldIndex) {
+                when (opcode) {
+                    OP_CONST_STRING -> {
+                        if (newIndex > 0xFFFF) {
+                            throw PatchException("String index $newIndex exceeds 0xFFFF for \"$new\" in $description")
+                        }
+                        payload.writeShort(dex.start + at + 2, newIndex)
+                        replaced++
+                    }
+                    OP_CONST_STRING_JUMBO -> {
+                        payload.writeInt(dex.start + at + 2, newIndex)
+                        replaced++
+                    }
+                }
+            }
+            false
+        }
+        if (replaced == 0) throw PatchException("$description loads no \"$old\"")
     }
 
     fun returnConstant(value: Int, declared: String) {

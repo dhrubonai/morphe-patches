@@ -47,12 +47,15 @@ private const val LIFE_STATUS_INTERCEPTOR = "Lcom/transsion/baselib/net/AppLifeS
 private const val PLAY_MODE = "Lkk/t;"
 private const val AD_SETTINGS = "Lqi/f;"
 private const val AD_SCENE_CONFIG = "Lcom/transsion/ad/scene/a;"
+private const val BOTTOM_TAB_TYPE = "Lcom/transsion/home/enum/BottomTabType;"
 
 private val MEMBER_CHECK_FLAGS = listOf("isPassed", "getVipEnable", "getVipPayEnable")
 
 private val MEMBER_FLAG_KEYS = listOf("kv_is_pay_enable_member", "kv_is_skip_ad", "kv_is_enable_member")
 private const val PARALLEL_DOWNLOAD_KEY = "kv_parallel_download_task_num"
 private const val UPSELL_DIALOG_LOG = "checkMemberShipShow data:"
+private const val PREMIUM_TAB_VALUE = "BT_PREMIUM"
+private const val PREMIUM_TAB_ENUM_NAME = "PREMIUM"
 private const val MEMBER_NOT_LOGGED_IN_LOG = "showMemberNotLoggedInLoginDialog:isLogin ="
 
 private val PREMIUM_QUOTA_KEYS = listOf("free_download_count", "max_resolution")
@@ -144,6 +147,7 @@ val allInOnePatch = resourcePatch(
             methodsCalling(MEMBER_PROVIDER, MEMBER_INFO, "isActive", BOOLEAN).returnEarly(true)
             methodWithString(MEMBER_PROVIDER, PARALLEL_DOWNLOAD_KEY).returnEarly(PARALLEL_DOWNLOAD_TASKS)
             methodWithString(MEMBER_PROVIDER, UPSELL_DIALOG_LOG).returnEarly()
+            methodWithString(BOTTOM_TAB_TYPE, PREMIUM_TAB_VALUE).replaceString(PREMIUM_TAB_VALUE, PREMIUM_TAB_ENUM_NAME)
 
             methodsCalling(PREMIUM_PROVIDER, MEMBER_INFO, "isActive", BOOLEAN).returnEarly(true)
             methodsCalling(PREMIUM_PROVIDER, MEMBER_INFO, "getVipLevel", BOOLEAN).returnEarly(true)

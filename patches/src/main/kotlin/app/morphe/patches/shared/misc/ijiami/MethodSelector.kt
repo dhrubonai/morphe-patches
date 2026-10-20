@@ -35,7 +35,7 @@ internal class LoadsString(private val value: String) : MethodSelector {
 
     override fun matches(dex: PayloadDex, methodIndex: Int, codeOffset: Int): Boolean {
         val string = dex.stringIndexOf(value) ?: return false
-        return dex.walkCode(methodIndex, codeOffset) { opcode, operand ->
+        return dex.walkCode(methodIndex, codeOffset) { opcode, operand, _ ->
             (opcode == OP_CONST_STRING || opcode == OP_CONST_STRING_JUMBO) && operand == string
         }
     }
@@ -52,13 +52,13 @@ internal class CallsMethod(
         if (dex.returnTypeOf(methodIndex) != returnType) return false
         val callees = dex.methodIndicesOf(classDescriptor, name)
         if (callees.isEmpty()) return false
-        return dex.walkCode(methodIndex, codeOffset) { opcode, operand ->
+        return dex.walkCode(methodIndex, codeOffset) { opcode, operand, _ ->
             opcode in INVOKE_OPCODES && operand in callees
         }
     }
 }
 
-private fun PayloadDex.walkCode(methodIndex: Int, codeOffset: Int, hit: (Int, Int) -> Boolean): Boolean {
+internal fun PayloadDex.walkCode(methodIndex: Int, codeOffset: Int, hit: (Int, Int, Int) -> Boolean): Boolean {
     val codeUnits = int(codeOffset + CODE_INSNS_SIZE_OFFSET)
     val instructions = codeOffset + CODE_HEADER_SIZE
     var cursor = 0
@@ -87,8 +87,8 @@ private fun PayloadDex.walkCode(methodIndex: Int, codeOffset: Int, hit: (Int, In
         }
 
         if (opcode == OP_CONST_STRING_JUMBO) {
-            if (hit(opcode, int(at + 2))) return true
-        } else if (opcode != OP_NOP && hit(opcode, short(at + 2))) {
+            if (hit(opcode, int(at + 2), at)) return true
+        } else if (opcode != OP_NOP && hit(opcode, short(at + 2), at)) {
             return true
         }
 

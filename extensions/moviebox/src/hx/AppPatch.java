@@ -26,7 +26,10 @@ import android.util.Base64;
 import android.util.Log;
 import android.widget.Toast;
 
+import java.io.ByteArrayOutputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
@@ -46,7 +49,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -68,6 +75,8 @@ public final class AppPatch {
     private static final String RESOURCE_LIST_SEGMENT = "/subject-api/resource/";
     private static final String USER_PROFILE = BFF + "/user-api/profile";
     private static final String MEMBER_DETAIL = BFF + "/vip/member/detail";
+    private static final String APP_TAB = BFF + "/subject-api/bottom-tab";
+    private static final String HIDDEN_HOME_TABS_ASSET = "hx_hidden_home_tabs";
     private static final String[] URL_FIELDS = {"url", "resourceLink", "downloadUrl", "playUrl"};
     private static final int MEMBER_DAYS_LEFT = 9999;
     private static final String MEMBER_EXPIRY = "2099-12-31";
@@ -209,7 +218,8 @@ public final class AppPatch {
         boolean routeDownloads = !isMainProcess() || server != null;
         try {
             if (server != null) server.start();
-            Object wrapped = addInterceptor(client, interceptor(loader, source, routeDownloads));
+            Object wrapped = addInterceptor(client,
+                    interceptor(loader, source, routeDownloads, readHiddenHomeTabs()));
             clientField.set(instance, wrapped);
             try {
                 callFactory.set(retrofit, wrapped);
@@ -300,11 +310,35 @@ public final class AppPatch {
         return builder.getClass().getMethod("build").invoke(builder);
     }
 
-    private static Object interceptor(ClassLoader loader, MovieBoxSource source, boolean routeDownloads)
-            throws Exception {
+    private static Object interceptor(ClassLoader loader, MovieBoxSource source, boolean routeDownloads,
+            Set<String> hiddenHomeTabs) throws Exception {
         Class<?> interceptorClass = Class.forName(OKHTTP_INTERCEPTOR, false, loader);
         return Proxy.newProxyInstance(loader, new Class<?>[]{interceptorClass},
-                new DashInterceptor(loader, source, routeDownloads));
+                new DashInterceptor(loader, source, routeDownloads, hiddenHomeTabs));
+    }
+
+    private static Set<String> readHiddenHomeTabs() {
+        Set<String> tabCodes = new HashSet<>();
+        try {
+            Context application = (Context) Class.forName(ACTIVITY_THREAD).getMethod("currentApplication")
+                    .invoke(null);
+            try (InputStream asset = application.getAssets().open(HIDDEN_HOME_TABS_ASSET)) {
+                ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                byte[] buffer = new byte[256];
+                for (int read; (read = asset.read(buffer)) != -1;) {
+                    bytes.write(buffer, 0, read);
+                }
+                for (String line : new String(bytes.toByteArray(), StandardCharsets.UTF_8).split("\n")) {
+                    if (!line.trim().isEmpty()) tabCodes.add(line.trim());
+                }
+            }
+        } catch (FileNotFoundException absent) {
+            return tabCodes;
+        } catch (Exception ex) {
+            Log.e(TAG, "cannot read " + HIDDEN_HOME_TABS_ASSET, ex);
+        }
+        Log.i(TAG, "hidden home tabs: " + tabCodes);
+        return tabCodes;
     }
 
     private static final class SignedResource {
@@ -408,6 +442,8 @@ public final class AppPatch {
         private static final int ORIGIN_PROBE_TIMEOUT_MS = 10000;
         private static final int PLAY_INFO_ATTEMPTS = 5;
         private static final long PLAY_INFO_RETRY_DELAY_MS = 2000L;
+        private static final int DIRECT_FILE_SIZE_RETENTION = 512;
+        private static final long DIRECT_FILE_SIZE_TIMEOUT_MS = 5000L;
 
         private final ClassLoader loader;
         private final Object client;
@@ -415,6 +451,8 @@ public final class AppPatch {
         private final Map<String, SignedResource> resources = newLruMap(RESOURCE_RETENTION);
         private final Map<String, Long> originLengths = newLruMap(RESOURCE_RETENTION);
         private final Map<String, String> directFileUrls = newLruMap(RESOURCE_RETENTION);
+        private final Map<String, Long> directFileSizes = newLruMap(DIRECT_FILE_SIZE_RETENTION);
+        private final ExecutorService directFileSizeLookups = Executors.newCachedThreadPool();
         private final Map<String, Boolean> handedOff = newLruMap(RESOURCE_RETENTION);
         private final Map<String, FutureTask<DashFile>> files = newLruMap(FILE_RETENTION);
         private final CloudFrontPlayInfoClient cloudFrontPlayInfoClient = new CloudFrontPlayInfoClient();
@@ -445,18 +483,18 @@ public final class AppPatch {
         public DashFile open(final String subjectId, final int season, final int episode, final int height,
                              String origin, long originSize, String resourceId, boolean fromStart) throws IOException {
             String label = SignedResource.key(subjectId, season, episode) + "@" + height;
-            if (origin != null && originSize > 0 && originLength(origin) == originSize) {
-                Log.i(TAG, label + ": redirect to origin, size " + originSize + " matches");
-                return null;
-            }
             String directFileUrl = knownDirectFileUrl(resourceId);
-            if (directFileUrl != null) throw new DashServer.RedirectException(directFileUrl);
+            if (directFileUrl != null) {
+                throw new DashServer.RedirectException(directFileUrl);
+            }
             SignedResource signed;
             try {
                 signed = resource(subjectId, season, episode, null);
             } catch (NoSignedResourceException noResource) {
-                if (origin == null) throw noResource;
-                directFileUrl = resolveDirectFileUrl(subjectId, resourceId, origin, originSize);
+                if (origin == null) {
+                    throw noResource;
+                }
+                directFileUrl = resolveDirectFileUrl(subjectId, resourceId, origin);
                 if (directFileUrl != null) {
                     Log.i(TAG, label + ": redirect to direct file on " + Uri.parse(directFileUrl).getHost());
                     throw new DashServer.RedirectException(directFileUrl);
@@ -464,7 +502,11 @@ public final class AppPatch {
                 diagnose(NO_STREAM);
                 throw new DashServer.UnavailableException(label + ": no signed DASH resource and no direct file");
             }
-            if (isHandedOff(label, subjectId, signed, resourceId, origin, originSize, fromStart)) {
+            if (origin != null && originSize > 0 && originLength(origin) == originSize) {
+                Log.i(TAG, label + ": redirect to origin, size " + originSize + " matches");
+                return null;
+            }
+            if (isHandedOff(label, subjectId, signed, resourceId, origin, fromStart)) {
                 throw new DashServer.UnavailableException(label + ": DASH on " + Uri.parse(signed.manifestUrl).getHost()
                         + ", leaving the download to the app's direct file");
             }
@@ -472,13 +514,13 @@ public final class AppPatch {
         }
 
         private boolean isHandedOff(String label, String subjectId, SignedResource signed, String resourceId,
-                                    String origin, long originSize, boolean fromStart) {
+                                    String origin, boolean fromStart) {
             synchronized (handedOff) {
                 Boolean decided = handedOff.get(label);
                 if (decided != null) return decided;
             }
             boolean handOff = fromStart && !DashFile.isUnpacedCdn(signed.manifestUrl)
-                    && resolveDirectFileUrl(subjectId, resourceId, origin, originSize) != null;
+                    && resolveDirectFileUrl(subjectId, resourceId, origin) != null;
             synchronized (handedOff) {
                 Boolean decided = handedOff.get(label);
                 if (decided != null) return decided;
@@ -493,15 +535,11 @@ public final class AppPatch {
             try {
                 JSONObject root = new JSONObject(playInfo);
                 JSONObject data = root.getJSONObject("data");
-                JSONArray rows = new JSONObject(get(apiBase + RESOURCE_LIST + "?subjectId=" + subjectId
-                        + "&page=1&perPage=8&all=0&startPosition=1&endPosition=1&pagerMode=2&resolution=0&se="
-                        + season + "&epFrom=" + episode + "&epTo=" + episode + "&isVip=true"))
-                        .getJSONObject("data").getJSONArray("list");
+                List<JSONObject> rows = fetchEpisodeResources(subjectId, season, episode);
                 List<JSONObject> streams = new ArrayList<>();
-                for (int i = 0; i < rows.length(); i++) {
+                for (int i = 0; i < rows.size(); i++) {
                     try {
-                        JSONObject row = rows.getJSONObject(i);
-                        if (row.optInt("se", -1) != season || row.optInt("ep", -1) != episode) continue;
+                        JSONObject row = rows.get(i);
                         String resourceId = row.getString("resourceId");
                         String url = fetchDirectFileUrl(subjectId, resourceId, row.optString("resourceLink"));
                         if (url.isEmpty()) continue;
@@ -523,7 +561,7 @@ public final class AppPatch {
                     Log.w(TAG, "play-info " + key + ": no direct file");
                     return null;
                 }
-                Collections.sort(streams, (a, b) -> Integer.compare(b.optInt("resolutions"), a.optInt("resolutions")));
+                Collections.sort(streams, (a, b) -> Integer.compare(a.optInt("resolutions"), b.optInt("resolutions")));
                 StringBuilder resolutions = new StringBuilder();
                 for (JSONObject stream : streams) {
                     if (resolutions.length() > 0) resolutions.append(',');
@@ -540,6 +578,62 @@ public final class AppPatch {
             }
         }
 
+        private List<JSONObject> fetchEpisodeResources(String subjectId, int season, int episode)
+                throws IOException, JSONException {
+            JSONObject listing = fetchResourceListing(subjectId, season, episode, 0);
+            List<JSONObject> rows = new ArrayList<>();
+            addEpisodeRows(rows, listing.getJSONArray("list"), season, episode, 0);
+            JSONArray collectionResolutions = listing.optJSONArray("collectionResolutions");
+            if (collectionResolutions == null) {
+                return rows;
+            }
+            for (int i = 0; i < collectionResolutions.length(); i++) {
+                int resolution = collectionResolutions.getJSONObject(i).optInt("resolution");
+                if (resolution <= 0 || hasResolution(rows, resolution)) {
+                    continue;
+                }
+                try {
+                    JSONArray list = fetchResourceListing(subjectId, season, episode, resolution).getJSONArray("list");
+                    addEpisodeRows(rows, list, season, episode, resolution);
+                } catch (IOException | JSONException e) {
+                    Log.w(TAG, "resource list " + subjectId + "/" + season + "/" + episode + " at " + resolution
+                            + "p not read", e);
+                }
+            }
+            return rows;
+        }
+
+        private JSONObject fetchResourceListing(String subjectId, int season, int episode, int resolution)
+                throws IOException, JSONException {
+            return new JSONObject(get(apiBase + RESOURCE_LIST + "?subjectId=" + subjectId
+                    + "&page=1&perPage=8&all=0&startPosition=1&endPosition=1&pagerMode=2&resolution=" + resolution
+                    + "&se=" + season + "&epFrom=" + episode + "&epTo=" + episode + "&isVip=true"))
+                    .getJSONObject("data");
+        }
+
+        private static void addEpisodeRows(List<JSONObject> rows, JSONArray list, int season, int episode,
+                int resolution) throws JSONException {
+            for (int i = 0; i < list.length(); i++) {
+                JSONObject row = list.getJSONObject(i);
+                if (row.optInt("se", -1) != season || row.optInt("ep", -1) != episode) {
+                    continue;
+                }
+                if (resolution > 0 && row.optInt("resolution") != resolution) {
+                    continue;
+                }
+                rows.add(row);
+            }
+        }
+
+        private static boolean hasResolution(List<JSONObject> rows, int resolution) {
+            for (JSONObject row : rows) {
+                if (row.optInt("resolution") == resolution) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private String knownDirectFileUrl(String resourceId) {
             if (resourceId == null) return null;
             synchronized (directFileUrls) {
@@ -547,11 +641,14 @@ public final class AppPatch {
             }
         }
 
-        private String resolveDirectFileUrl(String subjectId, String resourceId, String origin, long originSize) {
-            if (origin == null || originSize <= 0) return null;
+        private String resolveDirectFileUrl(String subjectId, String resourceId, String origin) {
             String known = knownDirectFileUrl(resourceId);
-            if (known != null) return known;
-            if (resourceId == null) return null;
+            if (known != null) {
+                return known;
+            }
+            if (origin == null || resourceId == null) {
+                return null;
+            }
             String url;
             long length;
             try {
@@ -561,9 +658,11 @@ public final class AppPatch {
                 Log.w(TAG, "direct file " + resourceId + " not checked", e);
                 return null;
             }
-            Log.i(TAG, "direct file " + resourceId + ": " + (url.isEmpty() ? "none"
-                    : Uri.parse(url).getHost() + ", " + length + " of " + originSize + " bytes"));
-            if (length != originSize) return null;
+            Log.i(TAG, "direct file " + resourceId + ": "
+                    + (url.isEmpty() ? "none" : Uri.parse(url).getHost() + ", " + length + " bytes"));
+            if (length <= 0 || url.equals(origin)) {
+                return null;
+            }
             synchronized (directFileUrls) {
                 directFileUrls.put(resourceId, url);
             }
@@ -572,10 +671,77 @@ public final class AppPatch {
 
         private String fetchDirectFileUrl(String subjectId, String resourceId, String origin) throws IOException,
                 JSONException {
+            JSONObject directFile = fetchDirectFile(subjectId, resourceId, origin);
+            return (directFile == null) ? "" : directFile.optString("resourceLink", "");
+        }
+
+        private JSONObject fetchDirectFile(String subjectId, String resourceId, String origin) throws IOException,
+                JSONException {
             JSONArray list = new JSONObject(get(apiBase + RESOURCE_POSITION + "?subjectId=" + subjectId
                     + "&resourceId=" + resourceId + "&failUrl=" + Uri.encode(origin)
                     + "&failCode=404&resourceNum=0&isVip=true")).getJSONObject("data").optJSONArray("list");
-            return list == null || list.length() == 0 ? "" : list.getJSONObject(0).optString("resourceLink", "");
+            return (list == null || list.length() == 0) ? null : list.getJSONObject(0);
+        }
+
+        String withDirectFileSizes(String body) {
+            try {
+                JSONObject root = new JSONObject(body);
+                JSONObject data = root.optJSONObject("data");
+                final String subjectId = (data == null) ? "" : data.optString("subjectId", "");
+                JSONArray list = (data == null) ? null : data.optJSONArray("list");
+                if (subjectId.isEmpty() || list == null) {
+                    return body;
+                }
+                List<Callable<Boolean>> lookups = new ArrayList<>();
+                for (int i = 0; i < list.length(); i++) {
+                    final JSONObject item = list.optJSONObject(i);
+                    if (item != null && !item.optString("resourceId", "").isEmpty()) {
+                        lookups.add(() -> resolveDirectFileSize(subjectId, item));
+                    }
+                }
+                int sized = 0;
+                for (Future<Boolean> lookup : this.directFileSizeLookups.invokeAll(lookups,
+                        DIRECT_FILE_SIZE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                    try {
+                        if (!lookup.isCancelled() && lookup.get()) {
+                            sized++;
+                        }
+                    } catch (ExecutionException ex) {
+                        Log.w(TAG, "resource list " + subjectId + ": direct file size not read", ex.getCause());
+                    }
+                }
+                Log.i(TAG, "resource list " + subjectId + ": sized " + sized + " of " + lookups.size() + " items");
+                return (sized > 0) ? root.toString() : body;
+            } catch (JSONException | InterruptedException ex) {
+                Log.w(TAG, "resource list sizes not read: " + ex.getMessage());
+                return body;
+            }
+        }
+
+        private boolean resolveDirectFileSize(String subjectId, JSONObject item) throws IOException, JSONException {
+            String resourceId = item.getString("resourceId");
+            Long size;
+            synchronized (this.directFileSizes) {
+                size = this.directFileSizes.get(resourceId);
+            }
+            if (size == null) {
+                String origin = item.optString("resourceLink", "");
+                JSONObject directFile = fetchDirectFile(subjectId, resourceId, origin);
+                String url = (directFile == null) ? "" : directFile.optString("resourceLink", "");
+                long length = (directFile == null) ? 0 : directFile.optLong("size", 0);
+                if (url.isEmpty() || url.equals(origin) || length <= 0) {
+                    return false;
+                }
+                size = length;
+                synchronized (this.directFileSizes) {
+                    this.directFileSizes.put(resourceId, size);
+                }
+                synchronized (this.directFileUrls) {
+                    this.directFileUrls.put(resourceId, url);
+                }
+            }
+            item.put("size", String.valueOf(size));
+            return true;
         }
 
         private long originLength(String origin) {
@@ -772,11 +938,14 @@ public final class AppPatch {
         private final ClassLoader loader;
         private final MovieBoxSource source;
         private final boolean routeDownloads;
+        private final Set<String> hiddenHomeTabs;
 
-        DashInterceptor(ClassLoader loader, MovieBoxSource source, boolean routeDownloads) {
+        DashInterceptor(ClassLoader loader, MovieBoxSource source, boolean routeDownloads,
+                Set<String> hiddenHomeTabs) {
             this.loader = loader;
             this.source = source;
             this.routeDownloads = routeDownloads;
+            this.hiddenHomeTabs = hiddenHomeTabs;
         }
 
         @Override
@@ -811,7 +980,8 @@ public final class AppPatch {
             boolean playInfo = url.contains(PLAY_INFO_SEGMENT);
             boolean resourceList = url.contains(RESOURCE_LIST_SEGMENT);
             boolean memberInfo = url.contains(USER_PROFILE) || url.contains(MEMBER_DETAIL);
-            if (!playInfo && !resourceList && !memberInfo) return response;
+            boolean appTab = !hiddenHomeTabs.isEmpty() && url.contains(APP_TAB);
+            if (!playInfo && !resourceList && !memberInfo && !appTab) return response;
 
             Object body = response.getClass().getMethod("body").invoke(response);
             if (body == null) return response;
@@ -853,7 +1023,9 @@ public final class AppPatch {
                 out = rewritePlayInfo(text, requested.getQueryParameter("subjectId"),
                         parseQueryInt(requested, "se"), parseQueryInt(requested, "ep"));
             } else if (resourceList) {
-                out = routeDownloads ? rewriteResourceList(text) : text;
+                out = routeDownloads ? rewriteResourceList(source.withDirectFileSizes(text)) : text;
+            } else if (url.contains(APP_TAB)) {
+                out = withoutHomeTabs(text, hiddenHomeTabs);
             } else {
                 out = rewriteMemberDays(text);
             }
@@ -1016,6 +1188,32 @@ public final class AppPatch {
         item.put("resourceLink", DashServer.buildUrl(subjectId, season, episode, height, origin, item.optLong("size", 0),
                 resourceId.isEmpty() ? null : resourceId));
         return true;
+    }
+
+    static String withoutHomeTabs(String body, Set<String> tabCodes) {
+        try {
+            JSONObject root = new JSONObject(body);
+            JSONObject data = root.optJSONObject("data");
+            JSONArray bottomTabs = (data != null) ? data.optJSONArray("bottomTabs") : null;
+            if (bottomTabs == null) return body;
+            int removed = 0;
+            for (int i = 0; i < bottomTabs.length(); i++) {
+                JSONObject bottomTab = bottomTabs.optJSONObject(i);
+                JSONArray subTabs = (bottomTab != null) ? bottomTab.optJSONArray("subTabs") : null;
+                if (subTabs == null) continue;
+                for (int j = subTabs.length() - 1; j >= 0; j--) {
+                    JSONObject subTab = subTabs.optJSONObject(j);
+                    if (subTab != null && tabCodes.contains(subTab.optString("tabCode"))) {
+                        subTabs.remove(j);
+                        removed++;
+                    }
+                }
+            }
+            return (removed > 0) ? root.toString() : body;
+        } catch (JSONException malformed) {
+            Log.w(TAG, "app tabs not rewritten: " + malformed.getMessage());
+            return body;
+        }
     }
 
     static String rewriteMemberDays(String body) {
