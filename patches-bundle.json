@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-10-20T13:40:00Z",
-  "description": "## [1.31.0](https://github.com/dhrubonai/morphe-patches/releases/tag/v1.31.0) (2026-10-20)\n\n### Bug Fixes\n\n* **MovieBox - All-In-One:** fixed downloads saving the update MovieBox trailer instead of the actual video. The previous strict file-size validation was rejecting valid direct file URLs because MovieBox API returns placeholder sizes. Also includes series resolution fix and real file sizes in download list. **Users must re-patch their MovieBox APK** — updating the bundle alone is not enough.",
-  "download_url": "https://github.com/dhrubonai/morphe-patches/releases/download/v1.31.0/patches-1.31.0.mpp",
+  "created_at": "2026-10-27T17:58:00Z",
+  "description": "## [1.32.0](https://github.com/dhrubonai/morphe-patches/releases/tag/v1.32.0) (2026-10-27)\n\n### Bug Fixes\n\n* **MovieBox - All-In-One:** fixed streaming broken since Oct 22. MovieBox changed their CloudFront server-side signing and rejected requests signed with the old hardcoded fallback key. The patch now reads the gateway_secret_online key from the installed app manifest at runtime, and stays on Edge-Cache (direct file fallback) when the key is unavailable. Also adds support for MovieBox 4.0.03.1022.03. **Users must re-patch their MovieBox APK.**",
+  "download_url": "https://github.com/dhrubonai/morphe-patches/releases/download/v1.32.0/patches-1.32.0.mpp",
   "signature_download_url": "",
-  "version": "1.31.0"
+  "version": "1.32.0"
 }
