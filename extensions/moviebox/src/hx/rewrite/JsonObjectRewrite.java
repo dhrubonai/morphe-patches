@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 hxreborn
+ * SPDX-License-Identifier: GPL-3.0-only
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -12,18 +13,18 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Additional term under GPLv3 Section 7(b): When conveying this material
+ * or modified versions, preserve this notice and credit hxreborn for this
+ * material in any Appropriate Legal Notices displayed by works containing it.
  */
-package hx;
+package hx.rewrite;
 
-import android.content.Context;
+import org.json.JSONException;
+import org.json.JSONObject;
 
-final class InstalledApp {
-    private static final String ACTIVITY_THREAD = "android.app.ActivityThread";
+interface JsonObjectRewrite {
 
-    private InstalledApp() {
-    }
+    boolean apply(JSONObject node) throws JSONException;
 
-    static Context context() throws ReflectiveOperationException {
-        return (Context) Class.forName(ACTIVITY_THREAD).getMethod("currentApplication").invoke(null);
-    }
 }
